@@ -14,7 +14,6 @@ import (
 	policyopts "github.com/gittuf/gittuf/internal/policy/options/policy"
 	"github.com/gittuf/gittuf/internal/rsl"
 	"github.com/gittuf/gittuf/internal/signerverifier/dsse"
-	"github.com/gittuf/gittuf/internal/signerverifier/gpg"
 	"github.com/gittuf/gittuf/internal/signerverifier/ssh"
 	"github.com/gittuf/gittuf/internal/tuf"
 	tufv01 "github.com/gittuf/gittuf/internal/tuf/v01"
@@ -668,107 +667,6 @@ func TestStateFindVerifiersForPath(t *testing.T) {
 	})
 }
 
-func TestGetStateForCommit(t *testing.T) {
-	t.Parallel()
-	repo, firstState := createTestRepository(t, createTestStateWithPolicy)
-
-	// Create some commits
-	refName := "refs/heads/main"
-	treeBuilder := gitinterface.NewTreeBuilder(repo)
-	emptyTreeHash, err := treeBuilder.WriteTreeFromEntries(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitID, err := repo.Commit(emptyTreeHash, refName, "Initial commit", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// No RSL entry for commit => no state yet
-	state, err := GetStateForCommit(context.Background(), repo, commitID)
-	assert.Nil(t, err)
-	assert.Nil(t, state)
-
-	// Record RSL entry for commit
-	if err := rsl.NewReferenceEntry(refName, commitID).Commit(repo, false); err != nil {
-		t.Fatal(err)
-	}
-
-	state, err = GetStateForCommit(context.Background(), repo, commitID)
-	assert.Nil(t, err)
-	assertStatesEqual(t, firstState, state)
-
-	// Create new branch, record new commit there
-	anotherRefName := "refs/heads/feature"
-	if err := repo.SetReference(anotherRefName, commitID); err != nil {
-		t.Fatal(err)
-	}
-	newCommitID, err := repo.Commit(emptyTreeHash, anotherRefName, "Second commit", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := rsl.NewReferenceEntry(anotherRefName, newCommitID).Commit(repo, false); err != nil {
-		t.Fatal(err)
-	}
-
-	state, err = GetStateForCommit(context.Background(), repo, newCommitID)
-	assert.Nil(t, err)
-	assertStatesEqual(t, firstState, state)
-
-	// Update policy, record in RSL
-	secondState, err := LoadCurrentState(context.Background(), repo, PolicyRef) // secondState := firstState will modify firstState as well
-	if err != nil {
-		t.Fatal(err)
-	}
-	targetsMetadata, err := secondState.GetTargetsMetadata(TargetsRoleName, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyR, err := gpg.LoadGPGKeyFromBytes(gpgPubKeyBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := tufv01.NewKeyFromSSLibKey(keyR)
-	if err := targetsMetadata.AddRule("new-rule", []string{key.KeyID}, []string{"*"}, 1); err != nil { // just a dummy rule
-		t.Fatal(err)
-	}
-
-	signer := setupSSHKeysForSigning(t, rootKeyBytes, rootPubKeyBytes)
-
-	targetsEnv, err := dsse.CreateEnvelope(targetsMetadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	targetsEnv, err = dsse.SignEnvelope(context.Background(), targetsEnv, signer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondState.Metadata.TargetsEnvelope = targetsEnv
-	if err := secondState.Commit(repo, "Second state", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := Apply(context.Background(), repo, false); err != nil {
-		t.Fatal(err)
-	}
-
-	// Merge feature branch commit into main
-	if err := repo.CheckAndSetReference(refName, newCommitID, commitID); err != nil {
-		t.Fatal(err)
-	}
-
-	// Record in RSL
-	if err := rsl.NewReferenceEntry(refName, newCommitID).Commit(repo, false); err != nil {
-		t.Fatal(err)
-	}
-
-	// Check that for this commit ID, the first state is returned and not the
-	// second
-	state, err = GetStateForCommit(context.Background(), repo, newCommitID)
-	assert.Nil(t, err)
-	assertStatesEqual(t, firstState, state)
-}
-
 func TestStateHasFileRule(t *testing.T) {
 	t.Parallel()
 	t.Run("with file rules", func(t *testing.T) {
@@ -788,64 +686,181 @@ func TestStateHasFileRule(t *testing.T) {
 }
 
 func TestApply(t *testing.T) {
-	repo, state := createTestRepository(t, createTestStateWithOnlyRoot)
+	t.Run("regular apply", func(t *testing.T) {
+		repo, state := createTestRepository(t, createTestStateWithOnlyRoot)
 
-	key := tufv01.NewKeyFromSSLibKey(ssh.NewKeyFromBytes(t, rootPubKeyBytes))
+		key := tufv01.NewKeyFromSSLibKey(ssh.NewKeyFromBytes(t, rootPubKeyBytes))
 
-	signer := setupSSHKeysForSigning(t, rootKeyBytes, rootPubKeyBytes)
+		signer := setupSSHKeysForSigning(t, rootKeyBytes, rootPubKeyBytes)
 
-	rootMetadata, err := state.GetRootMetadata(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+		rootMetadata, err := state.GetRootMetadata(false)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if err := rootMetadata.AddPrimaryRuleFilePrincipal(key); err != nil {
-		t.Fatal(err)
-	}
+		if err := rootMetadata.AddPrimaryRuleFilePrincipal(key); err != nil {
+			t.Fatal(err)
+		}
 
-	rootEnv, err := dsse.CreateEnvelope(rootMetadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootEnv, err = dsse.SignEnvelope(context.Background(), rootEnv, signer)
-	if err != nil {
-		t.Fatal(err)
-	}
+		rootEnv, err := dsse.CreateEnvelope(rootMetadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootEnv, err = dsse.SignEnvelope(context.Background(), rootEnv, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	state.Metadata.RootEnvelope = rootEnv
+		state.Metadata.RootEnvelope = rootEnv
 
-	if err := state.Commit(repo, "Added target key to root", false); err != nil {
-		t.Fatal(err)
-	}
+		if err := state.Commit(repo, "Added target key to root", false); err != nil {
+			t.Fatal(err)
+		}
 
-	staging, err := LoadCurrentState(testCtx, repo, PolicyStagingRef)
-	if err != nil {
-		t.Fatal(err)
-	}
+		staging, err := LoadCurrentState(testCtx, repo, PolicyStagingRef)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	policy, err := LoadCurrentState(testCtx, repo, PolicyRef)
-	if err != nil {
-		t.Fatal(err)
-	}
+		policy, err := LoadCurrentState(testCtx, repo, PolicyRef)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	// Currently the policy ref is behind the staging ref, since the staging ref currently has an extra target key
-	assertStatesNotEqual(t, staging, policy)
+		// Currently the policy ref is behind the staging ref, since the staging ref currently has an extra target key
+		assertStatesNotEqual(t, staging, policy)
 
-	err = Apply(testCtx, repo, false)
-	assert.Nil(t, err)
+		err = Apply(testCtx, repo, false)
+		assert.Nil(t, err)
 
-	staging, err = LoadCurrentState(testCtx, repo, PolicyStagingRef)
-	if err != nil {
-		t.Fatal(err)
-	}
+		staging, err = LoadCurrentState(testCtx, repo, PolicyStagingRef)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	policy, err = LoadCurrentState(testCtx, repo, PolicyRef)
-	if err != nil {
-		t.Fatal(err)
-	}
+		policy, err = LoadCurrentState(testCtx, repo, PolicyRef)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	// After Apply, the policy ref was fast-forward merged with the staging ref
-	assertStatesEqual(t, staging, policy)
+		// After Apply, the policy ref was fast-forward merged with the staging ref
+		assertStatesEqual(t, staging, policy)
+	})
+
+	t.Run("policy out of sync with RSL, entry does not exist", func(t *testing.T) {
+		repo, state := createTestRepository(t, createTestStateWithOnlyRoot)
+		latestEntry, err := rsl.GetLatestEntry(repo)
+		require.Nil(t, err)
+		parentEntry, err := rsl.GetParentForEntry(repo, latestEntry)
+		require.Nil(t, err)
+
+		// Undo entry for policy in RSL to force sync issue
+		err = repo.SetReference(rsl.Ref, parentEntry.GetID())
+		require.Nil(t, err)
+
+		key := tufv01.NewKeyFromSSLibKey(ssh.NewKeyFromBytes(t, rootPubKeyBytes))
+		signer := setupSSHKeysForSigning(t, rootKeyBytes, rootPubKeyBytes)
+		rootMetadata, err := state.GetRootMetadata(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := rootMetadata.AddPrimaryRuleFilePrincipal(key); err != nil {
+			t.Fatal(err)
+		}
+
+		rootEnv, err := dsse.CreateEnvelope(rootMetadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootEnv, err = dsse.SignEnvelope(context.Background(), rootEnv, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		state.Metadata.RootEnvelope = rootEnv
+
+		if err := state.Commit(repo, "Added target key to root", false); err != nil {
+			t.Fatal(err)
+		}
+
+		err = Apply(testCtx, repo, false)
+		assert.ErrorIs(t, err, ErrInvalidPolicy)
+	})
+
+	t.Run("policy out of sync with RSL, policy change does not match RSL", func(t *testing.T) {
+		repo, state := createTestRepository(t, createTestStateWithOnlyRoot)
+
+		key := tufv01.NewKeyFromSSLibKey(ssh.NewKeyFromBytes(t, rootPubKeyBytes))
+		signer := setupSSHKeysForSigning(t, rootKeyBytes, rootPubKeyBytes)
+		rootMetadata, err := state.GetRootMetadata(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := rootMetadata.AddPrimaryRuleFilePrincipal(key); err != nil {
+			t.Fatal(err)
+		}
+
+		rootEnv, err := dsse.CreateEnvelope(rootMetadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootEnv, err = dsse.SignEnvelope(context.Background(), rootEnv, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		state.Metadata.RootEnvelope = rootEnv
+
+		if err := state.Commit(repo, "Added target key to root", false); err != nil {
+			t.Fatal(err)
+		}
+
+		stagingTip, err := repo.GetReference(PolicyStagingRef)
+		require.Nil(t, err)
+		err = repo.SetReference(PolicyRef, stagingTip)
+		require.Nil(t, err)
+
+		err = Apply(testCtx, repo, false)
+		assert.ErrorIs(t, err, ErrInvalidPolicy)
+	})
+
+	t.Run("policy out of sync with RSL, policy ref does not exist", func(t *testing.T) {
+		repo, state := createTestRepository(t, createTestStateWithOnlyRoot)
+
+		key := tufv01.NewKeyFromSSLibKey(ssh.NewKeyFromBytes(t, rootPubKeyBytes))
+		signer := setupSSHKeysForSigning(t, rootKeyBytes, rootPubKeyBytes)
+		rootMetadata, err := state.GetRootMetadata(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := rootMetadata.AddPrimaryRuleFilePrincipal(key); err != nil {
+			t.Fatal(err)
+		}
+
+		rootEnv, err := dsse.CreateEnvelope(rootMetadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootEnv, err = dsse.SignEnvelope(context.Background(), rootEnv, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		state.Metadata.RootEnvelope = rootEnv
+
+		if err := state.Commit(repo, "Added target key to root", false); err != nil {
+			t.Fatal(err)
+		}
+
+		err = repo.DeleteReference(PolicyRef)
+		require.Nil(t, err)
+
+		err = Apply(testCtx, repo, false)
+		assert.ErrorIs(t, err, ErrInvalidPolicy)
+	})
 }
 
 func TestDiscard(t *testing.T) {

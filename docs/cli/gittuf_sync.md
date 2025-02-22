@@ -1,12 +1,16 @@
-## gittuf attest
+## gittuf sync
 
-Tools for attesting to code contributions
+Synchronize local references with remote references based on RSL
+
+```
+gittuf sync [remoteName] [flags]
+```
 
 ### Options
 
 ```
-  -h, --help                 help for attest
-  -k, --signing-key string   signing key to use to sign attestation
+  -h, --help        help for sync
+      --overwrite   overwrite local references with upstream changes
 ```
 
 ### Options inherited from parent commands
@@ -22,6 +26,4 @@ Tools for attesting to code contributions
 ### SEE ALSO
 
 * [gittuf](gittuf.md)	 - A security layer for Git repositories, powered by TUF
-* [gittuf attest authorize](gittuf_attest_authorize.md)	 - Add or revoke reference authorization
-* [gittuf attest github](gittuf_attest_github.md)	 - Tools to attest about GitHub actions and entities
 

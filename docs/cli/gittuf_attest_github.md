@@ -1,17 +1,11 @@
-## gittuf attest authorize
+## gittuf attest github
 
-Add or revoke reference authorization
-
-```
-gittuf attest authorize [flags]
-```
+Tools to attest about GitHub actions and entities
 
 ### Options
 
 ```
-  -f, --from-ref string   ref to authorize merging changes from
-  -h, --help              help for authorize
-  -r, --revoke            revoke existing authorization
+  -h, --help   help for github
 ```
 
 ### Options inherited from parent commands
@@ -28,4 +22,7 @@ gittuf attest authorize [flags]
 ### SEE ALSO
 
 * [gittuf attest](gittuf_attest.md)	 - Tools for attesting to code contributions
+* [gittuf attest github dismiss-approval](gittuf_attest_github_dismiss-approval.md)	 - Record dismissal of GitHub pull request approval
+* [gittuf attest github pull-request](gittuf_attest_github_pull-request.md)	 - Record GitHub pull request information as an attestation
+* [gittuf attest github record-approval](gittuf_attest_github_record-approval.md)	 - Record GitHub pull request approval
 

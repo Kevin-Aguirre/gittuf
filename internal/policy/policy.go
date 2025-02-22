@@ -48,7 +48,7 @@ var (
 	ErrMetadataNotFound           = errors.New("unable to find requested metadata file; has it been initialized?")
 	ErrDanglingDelegationMetadata = errors.New("unreachable targets metadata found")
 	ErrPolicyNotFound             = errors.New("cannot find policy")
-	ErrUnableToMatchRootKeys      = errors.New("unable to match root public keys, gittuf policy is in a broken state")
+	ErrInvalidPolicy              = errors.New("invalid policy state (is policy reference out of sync with corresponding RSL entry?)")
 	ErrNotAncestor                = errors.New("cannot apply changes since policy is not an ancestor of the policy staging")
 )
 
@@ -275,29 +275,6 @@ func LoadFirstState(ctx context.Context, repo *gitinterface.Repository, opts ...
 	}
 
 	return LoadState(ctx, repo, firstEntry, opts...)
-}
-
-// GetStateForCommit scans the RSL to identify the first time a commit was seen
-// in the repository. The policy preceding that RSL entry is returned as the
-// State to be used for verifying the commit's signature. If the commit hasn't
-// been seen in the repository previously, no policy state is returned. Also, no
-// error is returned. Identifying the policy in this case is left to the calling
-// workflow.
-func GetStateForCommit(ctx context.Context, repo *gitinterface.Repository, commitID gitinterface.Hash) (*State, error) {
-	firstSeenEntry, _, err := rsl.GetFirstReferenceUpdaterEntryForCommit(repo, commitID)
-	if err != nil {
-		if errors.Is(err, rsl.ErrNoRecordOfCommit) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	commitPolicyEntry, _, err := rsl.GetLatestReferenceUpdaterEntry(repo, rsl.ForReference(PolicyRef), rsl.BeforeEntryID(firstSeenEntry.GetID()))
-	if err != nil {
-		return nil, err
-	}
-
-	return LoadState(ctx, repo, commitPolicyEntry)
 }
 
 // FindVerifiersForPath identifies the trusted set of verifiers for the
@@ -633,11 +610,38 @@ func (s *State) Commit(repo *gitinterface.Repository, commitMessage string, sign
 // would be invalid to be made, by utilizing the policy staging ref.
 func Apply(ctx context.Context, repo *gitinterface.Repository, signRSLEntry bool) error {
 	// Get the reference for the PolicyRef
+	referenceFound := true
 	policyTip, err := repo.GetReference(PolicyRef)
 	if err != nil {
 		if !errors.Is(err, gitinterface.ErrReferenceNotFound) {
 			return fmt.Errorf("failed to get policy reference %s: %w", PolicyRef, err)
 		}
+		referenceFound = false
+	}
+
+	entryFound := true
+	policyEntry, _, err := rsl.GetLatestReferenceUpdaterEntry(repo, rsl.ForReference(PolicyRef))
+	if err != nil {
+		if !errors.Is(err, rsl.ErrRSLEntryNotFound) {
+			return fmt.Errorf("failed to get policy RSL entry: %w", err)
+		}
+
+		entryFound = false
+	}
+
+	// case 1: both found -> verify tip matches entry
+	// case 2: only one found -> return error
+	// case 3: neither found -> nothing to verify
+	switch {
+	case referenceFound && entryFound:
+		if !policyEntry.GetTargetID().Equal(policyTip) {
+			return ErrInvalidPolicy
+		}
+	case (referenceFound && !entryFound) || (!referenceFound && entryFound):
+		return ErrInvalidPolicy
+	default:
+		slog.Debug("No prior applied policy found")
+		// Nothing to check or return here
 	}
 
 	// Get the reference for the PolicyStagingRef
